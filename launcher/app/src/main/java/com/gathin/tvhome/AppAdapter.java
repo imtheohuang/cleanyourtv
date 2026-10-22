@@ -202,6 +202,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     private final Map<String, String> launchActions;
     /** Tile names and bundled banners that replace the app's own (config.xml, app_labels and app_banners). */
     private final Map<String, String> appLabels, appBanners;
+    /** Icon tiles get a tinted gradient card and larger icon (config.json icon_tiles "tinted"). */
+    private final boolean tintedIconTiles;
     private final List<Entry> items = new ArrayList<>();
 
     AppAdapter(Context ctx, TileListener listener, int dockSize, Config cfg) {
@@ -225,6 +227,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         this.launchActions = cfg.launchActions;
         this.appLabels = cfg.appLabels;
         this.appBanners = cfg.appBanners;
+        this.tintedIconTiles = cfg.tintedIconTiles;
         // Tiles keep their identity across reload(), so a focused tile stays on its app instead of
         // its view being rebound to whatever app now sits in that slot.
         setHasStableIds(true);
@@ -275,7 +278,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             if (banner == null) banner = loadBanner(pm, ri);
             // The icon is only drawn (and sampled for the glow) when there is no banner, so a tile with a
             // banner skips loading and decoding it.
-            Drawable icon = banner == null ? ri.loadIcon(pm) : null;
+            Drawable icon = banner == null ? (tintedIconTiles ? loadSharpIcon(pm, ri) : ri.loadIcon(pm)) : null;
             if (card != null) {
                 fresh.add(new Entry(Entry.CARD, label, component, banner, icon, card.caption, card.accent));
             } else {
@@ -347,6 +350,41 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
      */
     static boolean isBannerShaped(int width, int height) {
         return width <= 0 || height <= 0 || width >= height * 1.4f;
+    }
+
+    /**
+     * The app's icon at xhdpi or better (as loadBanner does), so the 64dp icon stays sharp through
+     * the focus zoom.
+     */
+    private Drawable loadSharpIcon(PackageManager pm, ResolveInfo ri) {
+        int id = ri.getIconResource();
+        if (id != 0) {
+            try {
+                Resources resources = pm.getResourcesForApplication(ri.activityInfo.applicationInfo);
+                int density = Math.max(DisplayMetrics.DENSITY_XXHIGH, ctx.getResources().getDisplayMetrics().densityDpi);
+                Drawable d = resources.getDrawableForDensity(id, density, null);
+                if (d != null) return d;
+            } catch (PackageManager.NameNotFoundException | Resources.NotFoundException ignored) {
+            }
+        }
+        return ri.loadIcon(pm);
+    }
+
+    /**
+     * The card behind an icon tile: a diagonal gradient from the icon's colour, kept dark so the white label
+     * reads, with the tile's corner radius.
+     */
+    private Drawable tintedCard(Entry e, int tileWidthPx) {
+        if (e.ambient == 0) e.ambient = vividColor(e.icon);
+        float[] hsv = new float[3];
+        Color.colorToHSV(e.ambient, hsv);
+        hsv[1] = Math.min(hsv[1], 0.75f);
+        float[] top = {hsv[0], hsv[1], 0.46f}, bottom = {hsv[0], Math.min(1f, hsv[1] * 1.1f), 0.20f};
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable(
+                android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+                new int[] {Color.HSVToColor(top), Color.HSVToColor(bottom)});
+        g.setCornerRadius(cornerRadius(tileWidthPx, ctx.getResources().getDisplayMetrics().density));
+        return g;
     }
 
     /** Lets go of every tile and its artwork (Home is in the background and memory is short). */
@@ -435,10 +473,23 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         } else {
             h.banner.setImageDrawable(null);
             h.banner.setVisibility(View.GONE);
+            // Tinted icon tiles drop the in-tile label (the focus name under the tile names them) and centre the icon.
+            boolean tinted = tintedIconTiles && e.kind != Entry.HOME_SETTINGS;
+            if (tinted) {
+                h.card.setBackground(tintedCard(e, h.card.getLayoutParams().width));
+                ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) h.icon.getLayoutParams();
+                int size = Math.round(64 * ctx.getResources().getDisplayMetrics().density);
+                if (lp.width != size || lp.bottomMargin != 0) {
+                    lp.width = size;
+                    lp.height = size;
+                    lp.bottomMargin = 0;
+                    h.icon.setLayoutParams(lp);
+                }
+            }
             h.icon.setImageDrawable(e.icon);
             h.icon.setVisibility(View.VISIBLE);
             h.label.setText(e.label);
-            h.label.setVisibility(View.VISIBLE);
+            h.label.setVisibility(tinted ? View.GONE : View.VISIBLE);
         }
         h.card.setOnClickListener(v -> launch(e));
         h.card.setOnLongClickListener(v -> {
